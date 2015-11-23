@@ -21,6 +21,8 @@ from ..utils import check_random_state, check_X_y, check_array, column_or_1d
 from ..utils.random import sample_without_replacement
 from ..utils.validation import has_fit_parameter, check_is_fitted
 from ..utils.fixes import bincount
+from ..utils.metaestimators import if_delegate_has_method
+from ..utils.multiclass import check_classification_targets
 
 from .base import BaseEnsemble, _partition_estimators
 
@@ -32,11 +34,10 @@ MAX_INT = np.iinfo(np.int32).max
 
 
 def _parallel_build_estimators(n_estimators, ensemble, X, y, sample_weight,
-                               seeds, verbose):
+                               max_samples, seeds, verbose):
     """Private function used to build a batch of estimators within a job."""
     # Retrieve settings
     n_samples, n_features = X.shape
-    max_samples = ensemble.max_samples
     max_features = ensemble.max_features
 
     if (not isinstance(max_samples, (numbers.Integral, np.integer)) and
@@ -51,7 +52,8 @@ def _parallel_build_estimators(n_estimators, ensemble, X, y, sample_weight,
     bootstrap_features = ensemble.bootstrap_features
     support_sample_weight = has_fit_parameter(ensemble.base_estimator_,
                                               "sample_weight")
-
+    if not support_sample_weight and sample_weight is not None:
+        raise ValueError("The base estimator doesn't support sample weight")
 
     # Build estimators
     estimators = []
@@ -63,7 +65,7 @@ def _parallel_build_estimators(n_estimators, ensemble, X, y, sample_weight,
             print("building estimator %d of %d" % (i + 1, n_estimators))
 
         random_state = check_random_state(seeds[i])
-        seed = check_random_state(random_state.randint(MAX_INT))
+        seed = random_state.randint(MAX_INT)
         estimator = ensemble._make_estimator(append=False)
 
         try:  # Not all estimator accept a random_state
@@ -204,6 +206,7 @@ class BaseBagging(with_metaclass(ABCMeta, BaseEnsemble)):
                  bootstrap=True,
                  bootstrap_features=False,
                  oob_score=False,
+                 warm_start=False,
                  n_jobs=1,
                  random_state=None,
                  verbose=0):
@@ -216,6 +219,7 @@ class BaseBagging(with_metaclass(ABCMeta, BaseEnsemble)):
         self.bootstrap = bootstrap
         self.bootstrap_features = bootstrap_features
         self.oob_score = oob_score
+        self.warm_start = warm_start
         self.n_jobs = n_jobs
         self.random_state = random_state
         self.verbose = verbose
@@ -244,10 +248,43 @@ class BaseBagging(with_metaclass(ABCMeta, BaseEnsemble)):
         self : object
             Returns self.
         """
+        return self._fit(X, y, self.max_samples, sample_weight=sample_weight)
+
+    def _fit(self, X, y, max_samples, max_depth=None, sample_weight=None):
+        """Build a Bagging ensemble of estimators from the training
+           set (X, y).
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape = [n_samples, n_features]
+            The training input samples. Sparse matrices are accepted only if
+            they are supported by the base estimator.
+
+        y : array-like, shape = [n_samples]
+            The target values (class labels in classification, real numbers in
+            regression).
+
+        max_samples : int or float, optional (default=None)
+            Argument to use instead of self.max_samples.
+
+        max_depth : int, optional (default=None)
+            Override value used when constructing base estimator. Only
+            supported if the base estimator has a max_depth parameter.
+
+        sample_weight : array-like, shape = [n_samples] or None
+            Sample weights. If None, then samples are equally weighted.
+            Note that this is supported only if the base estimator supports
+            sample weighting.
+
+        Returns
+        -------
+        self : object
+            Returns self.
+        """
         random_state = check_random_state(self.random_state)
 
         # Convert data
-        X, y = check_X_y(X, y, ['csr', 'csc', 'coo'])
+        X, y = check_X_y(X, y, ['csr', 'csc'])
 
         # Remap output
         n_samples, self.n_features_ = X.shape
@@ -256,10 +293,12 @@ class BaseBagging(with_metaclass(ABCMeta, BaseEnsemble)):
         # Check parameters
         self._validate_estimator()
 
-        if isinstance(self.max_samples, (numbers.Integral, np.integer)):
-            max_samples = self.max_samples
-        else:  # float
-            max_samples = int(self.max_samples * X.shape[0])
+        if max_depth is not None:
+            self.base_estimator_.max_depth = max_depth
+
+        # if max_samples is float:
+        if not isinstance(max_samples, (numbers.Integral, np.integer)):
+            max_samples = int(max_samples * X.shape[0])
 
         if not (0 < max_samples <= X.shape[0]):
             raise ValueError("max_samples must be in (0, n_samples]")
@@ -276,13 +315,41 @@ class BaseBagging(with_metaclass(ABCMeta, BaseEnsemble)):
             raise ValueError("Out of bag estimation only available"
                              " if bootstrap=True")
 
-        # Free allocated memory, if any
-        self.estimators_ = None
+        if self.warm_start and self.oob_score:
+            raise ValueError("Out of bag estimate only available"
+                             " if warm_start=False")
+
+        if hasattr(self, "oob_score_") and self.warm_start:
+            del self.oob_score_
+
+        if not self.warm_start or len(self.estimators_) == 0:
+            # Free allocated memory, if any
+            self.estimators_ = []
+            self.estimators_samples_ = []
+            self.estimators_features_ = []
+
+        n_more_estimators = self.n_estimators - len(self.estimators_)
+
+        if n_more_estimators < 0:
+            raise ValueError('n_estimators=%d must be larger or equal to '
+                             'len(estimators_)=%d when warm_start==True'
+                             % (self.n_estimators, len(self.estimators_)))
+
+        elif n_more_estimators == 0:
+            warn("Warm-start fitting without increasing n_estimators does not "
+                 "fit new trees.")
+            return self
 
         # Parallel loop
-        n_jobs, n_estimators, starts = _partition_estimators(self.n_estimators,
+        n_jobs, n_estimators, starts = _partition_estimators(n_more_estimators,
                                                              self.n_jobs)
-        seeds = random_state.randint(MAX_INT, size=self.n_estimators)
+
+        # Advance random state to state after training
+        # the first n_estimators
+        if self.warm_start and len(self.estimators_) > 0:
+            random_state.randint(MAX_INT, size=len(self.estimators_))
+
+        seeds = random_state.randint(MAX_INT, size=n_more_estimators)
 
         all_results = Parallel(n_jobs=n_jobs, verbose=self.verbose)(
             delayed(_parallel_build_estimators)(
@@ -291,16 +358,17 @@ class BaseBagging(with_metaclass(ABCMeta, BaseEnsemble)):
                 X,
                 y,
                 sample_weight,
+                max_samples,
                 seeds[starts[i]:starts[i + 1]],
                 verbose=self.verbose)
             for i in range(n_jobs))
 
         # Reduce
-        self.estimators_ = list(itertools.chain.from_iterable(
+        self.estimators_ += list(itertools.chain.from_iterable(
             t[0] for t in all_results))
-        self.estimators_samples_ = list(itertools.chain.from_iterable(
+        self.estimators_samples_ += list(itertools.chain.from_iterable(
             t[1] for t in all_results))
-        self.estimators_features_ = list(itertools.chain.from_iterable(
+        self.estimators_features_ += list(itertools.chain.from_iterable(
             t[2] for t in all_results))
 
         if self.oob_score:
@@ -337,6 +405,8 @@ class BaggingClassifier(BaseBagging, ClassifierMixin):
     on subsets of both samples and features, then the method is known as
     Random Patches [4]_.
 
+    Read more in the :ref:`User Guide <bagging>`.
+
     Parameters
     ----------
     base_estimator : object or None, optional (default=None)
@@ -365,6 +435,14 @@ class BaggingClassifier(BaseBagging, ClassifierMixin):
     oob_score : bool
         Whether to use out-of-bag samples to estimate
         the generalization error.
+
+    warm_start : bool, optional (default=False)
+        When set to True, reuse the solution of the previous call to fit
+        and add more estimators to the ensemble, otherwise, just fit
+        a whole new ensemble.
+
+        .. versionadded:: 0.17
+           *warm_start* constructor parameter.
 
     n_jobs : int, optional (default=1)
         The number of jobs to run in parallel for both `fit` and `predict`.
@@ -433,6 +511,7 @@ class BaggingClassifier(BaseBagging, ClassifierMixin):
                  bootstrap=True,
                  bootstrap_features=False,
                  oob_score=False,
+                 warm_start=False,
                  n_jobs=1,
                  random_state=None,
                  verbose=0):
@@ -445,6 +524,7 @@ class BaggingClassifier(BaseBagging, ClassifierMixin):
             bootstrap=bootstrap,
             bootstrap_features=bootstrap_features,
             oob_score=oob_score,
+            warm_start=warm_start,
             n_jobs=n_jobs,
             random_state=random_state,
             verbose=verbose)
@@ -495,6 +575,7 @@ class BaggingClassifier(BaseBagging, ClassifierMixin):
 
     def _validate_y(self, y):
         y = column_or_1d(y, warn=True)
+        check_classification_targets(y)
         self.classes_, y = np.unique(y, return_inverse=True)
         self.n_classes_ = len(self.classes_)
 
@@ -546,7 +627,7 @@ class BaggingClassifier(BaseBagging, ClassifierMixin):
         """
         check_is_fitted(self, "classes_")
         # Check data
-        X = check_array(X, accept_sparse=['csr', 'csc', 'coo'])
+        X = check_array(X, accept_sparse=['csr', 'csc'])
 
         if self.n_features_ != X.shape[1]:
             raise ValueError("Number of features of the model must "
@@ -593,7 +674,7 @@ class BaggingClassifier(BaseBagging, ClassifierMixin):
         check_is_fitted(self, "classes_")
         if hasattr(self.base_estimator_, "predict_log_proba"):
             # Check data
-            X = check_array(X)
+            X = check_array(X, accept_sparse=['csr', 'csc'])
 
             if self.n_features_ != X.shape[1]:
                 raise ValueError("Number of features of the model must "
@@ -626,6 +707,7 @@ class BaggingClassifier(BaseBagging, ClassifierMixin):
         else:
             return np.log(self.predict_proba(X))
 
+    @if_delegate_has_method(delegate='base_estimator')
     def decision_function(self, X):
         """Average of the decision functions of the base classifiers.
 
@@ -645,12 +727,9 @@ class BaggingClassifier(BaseBagging, ClassifierMixin):
 
         """
         check_is_fitted(self, "classes_")
-        # Trigger an exception if not supported
-        if not hasattr(self.base_estimator_, "decision_function"):
-            raise NotImplementedError
 
         # Check data
-        X = check_array(X)
+        X = check_array(X, accept_sparse=['csr', 'csc'])
 
         if self.n_features_ != X.shape[1]:
             raise ValueError("Number of features of the model must "
@@ -695,6 +774,8 @@ class BaggingRegressor(BaseBagging, RegressorMixin):
     on subsets of both samples and features, then the method is known as
     Random Patches [4]_.
 
+    Read more in the :ref:`User Guide <bagging>`.
+
     Parameters
     ----------
     base_estimator : object or None, optional (default=None)
@@ -723,6 +804,11 @@ class BaggingRegressor(BaseBagging, RegressorMixin):
     oob_score : bool
         Whether to use out-of-bag samples to estimate
         the generalization error.
+
+    warm_start : bool, optional (default=False)
+        When set to True, reuse the solution of the previous call to fit
+        and add more estimators to the ensemble, otherwise, just fit
+        a whole new ensemble.
 
     n_jobs : int, optional (default=1)
         The number of jobs to run in parallel for both `fit` and `predict`.
@@ -783,6 +869,7 @@ class BaggingRegressor(BaseBagging, RegressorMixin):
                  bootstrap=True,
                  bootstrap_features=False,
                  oob_score=False,
+                 warm_start=False,
                  n_jobs=1,
                  random_state=None,
                  verbose=0):
@@ -794,6 +881,7 @@ class BaggingRegressor(BaseBagging, RegressorMixin):
             bootstrap=bootstrap,
             bootstrap_features=bootstrap_features,
             oob_score=oob_score,
+            warm_start=warm_start,
             n_jobs=n_jobs,
             random_state=random_state,
             verbose=verbose)
@@ -817,7 +905,7 @@ class BaggingRegressor(BaseBagging, RegressorMixin):
         """
         check_is_fitted(self, "estimators_features_")
         # Check data
-        X = check_array(X, accept_sparse=['csr', 'csc', 'coo'])
+        X = check_array(X, accept_sparse=['csr', 'csc'])
 
         # Parallel loop
         n_jobs, n_estimators, starts = _partition_estimators(self.n_estimators,

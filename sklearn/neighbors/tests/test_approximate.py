@@ -10,6 +10,8 @@ import numpy as np
 import scipy.sparse as sp
 
 from sklearn.utils.testing import assert_array_equal
+from sklearn.utils.testing import assert_almost_equal
+from sklearn.utils.testing import assert_array_almost_equal
 from sklearn.utils.testing import assert_equal
 from sklearn.utils.testing import assert_raises
 from sklearn.utils.testing import assert_array_less
@@ -25,7 +27,7 @@ from sklearn.neighbors import NearestNeighbors
 
 
 def test_neighbors_accuracy_with_n_candidates():
-    """Checks whether accuracy increases as `n_candidates` increases."""
+    # Checks whether accuracy increases as `n_candidates` increases.
     n_candidates_values = np.array([.1, 50, 500])
     n_samples = 100
     n_features = 10
@@ -37,9 +39,10 @@ def test_neighbors_accuracy_with_n_candidates():
 
     for i, n_candidates in enumerate(n_candidates_values):
         lshf = LSHForest(n_candidates=n_candidates)
-        lshf.fit(X)
+        ignore_warnings(lshf.fit)(X)
         for j in range(n_iter):
-            query = X[rng.randint(0, n_samples)]
+            query = X[rng.randint(0, n_samples)].reshape(1, -1)
+
             neighbors = lshf.kneighbors(query, n_neighbors=n_points,
                                         return_distance=False)
             distances = pairwise_distances(query, X, metric='cosine')
@@ -59,7 +62,7 @@ def test_neighbors_accuracy_with_n_candidates():
 
 
 def test_neighbors_accuracy_with_n_estimators():
-    """Checks whether accuracy increases as `n_estimators` increases."""
+    # Checks whether accuracy increases as `n_estimators` increases.
     n_estimators = np.array([1, 10, 100])
     n_samples = 100
     n_features = 10
@@ -71,9 +74,9 @@ def test_neighbors_accuracy_with_n_estimators():
 
     for i, t in enumerate(n_estimators):
         lshf = LSHForest(n_candidates=500, n_estimators=t)
-        lshf.fit(X)
+        ignore_warnings(lshf.fit)(X)
         for j in range(n_iter):
-            query = X[rng.randint(0, n_samples)]
+            query = X[rng.randint(0, n_samples)].reshape(1, -1)
             neighbors = lshf.kneighbors(query, n_neighbors=n_points,
                                         return_distance=False)
             distances = pairwise_distances(query, X, metric='cosine')
@@ -94,12 +97,10 @@ def test_neighbors_accuracy_with_n_estimators():
 
 @ignore_warnings
 def test_kneighbors():
-    """Checks whether desired number of neighbors are returned.
-
-    It is guaranteed to return the requested number of neighbors
-    if `min_hash_match` is set to 0. Returned distances should be
-    in ascending order.
-    """
+    # Checks whether desired number of neighbors are returned.
+    # It is guaranteed to return the requested number of neighbors
+    # if `min_hash_match` is set to 0. Returned distances should be
+    # in ascending order.
     n_samples = 12
     n_features = 2
     n_iter = 10
@@ -110,11 +111,11 @@ def test_kneighbors():
     # Test unfitted estimator
     assert_raises(ValueError, lshf.kneighbors, X[0])
 
-    lshf.fit(X)
+    ignore_warnings(lshf.fit)(X)
 
     for i in range(n_iter):
         n_neighbors = rng.randint(0, n_samples)
-        query = X[rng.randint(0, n_samples)]
+        query = X[rng.randint(0, n_samples)].reshape(1, -1)
         neighbors = lshf.kneighbors(query, n_neighbors=n_neighbors,
                                     return_distance=False)
         # Desired number of neighbors should be returned.
@@ -133,7 +134,7 @@ def test_kneighbors():
                                 return_distance=False)
     assert_equal(neighbors.shape[0], n_queries)
     # Test random point(not in the data set)
-    query = rng.randn(n_features)
+    query = rng.randn(n_features).reshape(1, -1)
     lshf.kneighbors(query, n_neighbors=1,
                     return_distance=False)
     # Test n_neighbors at initialization
@@ -145,14 +146,12 @@ def test_kneighbors():
 
 
 def test_radius_neighbors():
-    """Checks whether Returned distances are less than `radius`
-
-    At least one point should be returned when the `radius` is set
-    to mean distance from the considering point to other points in
-    the database.
-    Moreover, this test compares the radius neighbors of LSHForest
-    with the `sklearn.neighbors.NearestNeighbors`.
-    """
+    # Checks whether Returned distances are less than `radius`
+    # At least one point should be returned when the `radius` is set
+    # to mean distance from the considering point to other points in
+    # the database.
+    # Moreover, this test compares the radius neighbors of LSHForest
+    # with the `sklearn.neighbors.NearestNeighbors`.
     n_samples = 12
     n_features = 2
     n_iter = 10
@@ -163,16 +162,23 @@ def test_radius_neighbors():
     # Test unfitted estimator
     assert_raises(ValueError, lshf.radius_neighbors, X[0])
 
-    lshf.fit(X)
+    ignore_warnings(lshf.fit)(X)
 
     for i in range(n_iter):
-        query = X[rng.randint(0, n_samples)]
+        # Select a random point in the dataset as the query
+        query = X[rng.randint(0, n_samples)].reshape(1, -1)
+
+        # At least one neighbor should be returned when the radius is the
+        # mean distance from the query to the points of the dataset.
         mean_dist = np.mean(pairwise_distances(query, X, metric='cosine'))
         neighbors = lshf.radius_neighbors(query, radius=mean_dist,
                                           return_distance=False)
-        # At least one neighbor should be returned.
-        assert_greater(neighbors.shape[0], 0)
-        # All distances should be less than mean_dist
+
+        assert_equal(neighbors.shape, (1,))
+        assert_equal(neighbors.dtype, object)
+        assert_greater(neighbors[0].shape[0], 0)
+        # All distances to points in the results of the radius query should
+        # be less than mean_dist
         distances, neighbors = lshf.radius_neighbors(query,
                                                      radius=mean_dist,
                                                      return_distance=True)
@@ -183,27 +189,97 @@ def test_radius_neighbors():
     queries = X[rng.randint(0, n_samples, n_queries)]
     distances, neighbors = lshf.radius_neighbors(queries,
                                                  return_distance=True)
-    assert_equal(neighbors.shape[0], n_queries)
-    assert_equal(distances.shape[0], n_queries)
-    # dists and inds should not be 2D arrays
-    assert_equal(distances.ndim, 1)
-    assert_equal(neighbors.ndim, 1)
+
+    # dists and inds should not be 1D arrays or arrays of variable lengths
+    # hence the use of the object dtype.
+    assert_equal(distances.shape, (n_queries,))
+    assert_equal(distances.dtype, object)
+    assert_equal(neighbors.shape, (n_queries,))
+    assert_equal(neighbors.dtype, object)
 
     # Compare with exact neighbor search
-    query = X[rng.randint(0, n_samples)]
+    query = X[rng.randint(0, n_samples)].reshape(1, -1)
     mean_dist = np.mean(pairwise_distances(query, X, metric='cosine'))
-    nbrs = NearestNeighbors(algorithm='brute', metric='cosine')
-    nbrs.fit(X)
+    nbrs = NearestNeighbors(algorithm='brute', metric='cosine').fit(X)
 
-    distances_approx, _ = lshf.radius_neighbors(query, radius=mean_dist)
     distances_exact, _ = nbrs.radius_neighbors(query, radius=mean_dist)
-    # Distances of exact neighbors is less than or equal to approximate
-    assert_true(np.all(np.less_equal(np.sort(distances_exact[0]),
-                                     np.sort(distances_approx[0]))))
+    distances_approx, _ = lshf.radius_neighbors(query, radius=mean_dist)
+
+    # Radius-based queries do not sort the result points and the order
+    # depends on the method, the random_state and the dataset order. Therefore
+    # we need to sort the results ourselves before performing any comparison.
+    sorted_dists_exact = np.sort(distances_exact[0])
+    sorted_dists_approx = np.sort(distances_approx[0])
+
+    # Distances to exact neighbors are less than or equal to approximate
+    # counterparts as the approximate radius query might have missed some
+    # closer neighbors.
+    assert_true(np.all(np.less_equal(sorted_dists_exact,
+                                     sorted_dists_approx)))
+
+
+@ignore_warnings
+def test_radius_neighbors_boundary_handling():
+    X = [[0.999, 0.001], [0.5, 0.5], [0, 1.], [-1., 0.001]]
+    n_points = len(X)
+
+    # Build an exact nearest neighbors model as reference model to ensure
+    # consistency between exact and approximate methods
+    nnbrs = NearestNeighbors(algorithm='brute', metric='cosine').fit(X)
+
+    # Build a LSHForest model with hyperparameter values that always guarantee
+    # exact results on this toy dataset.
+    lsfh = LSHForest(min_hash_match=0, n_candidates=n_points).fit(X)
+
+    # define a query aligned with the first axis
+    query = [[1., 0.]]
+
+    # Compute the exact cosine distances of the query to the four points of
+    # the dataset
+    dists = pairwise_distances(query, X, metric='cosine').ravel()
+
+    # The first point is almost aligned with the query (very small angle),
+    # the cosine distance should therefore be almost null:
+    assert_almost_equal(dists[0], 0, decimal=5)
+
+    # The second point form an angle of 45 degrees to the query vector
+    assert_almost_equal(dists[1], 1 - np.cos(np.pi / 4))
+
+    # The third point is orthogonal from the query vector hence at a distance
+    # exactly one:
+    assert_almost_equal(dists[2], 1)
+
+    # The last point is almost colinear but with opposite sign to the query
+    # therefore it has a cosine 'distance' very close to the maximum possible
+    # value of 2.
+    assert_almost_equal(dists[3], 2, decimal=5)
+
+    # If we query with a radius of one, all the samples except the last sample
+    # should be included in the results. This means that the third sample
+    # is lying on the boundary of the radius query:
+    exact_dists, exact_idx = nnbrs.radius_neighbors(query, radius=1)
+    approx_dists, approx_idx = lsfh.radius_neighbors(query, radius=1)
+
+    assert_array_equal(np.sort(exact_idx[0]), [0, 1, 2])
+    assert_array_equal(np.sort(approx_idx[0]), [0, 1, 2])
+    assert_array_almost_equal(np.sort(exact_dists[0]), dists[:-1])
+    assert_array_almost_equal(np.sort(approx_dists[0]), dists[:-1])
+
+    # If we perform the same query with a slighltly lower radius, the third
+    # point of the dataset that lay on the boundary of the previous query
+    # is now rejected:
+    eps = np.finfo(np.float64).eps
+    exact_dists, exact_idx = nnbrs.radius_neighbors(query, radius=1 - eps)
+    approx_dists, approx_idx = lsfh.radius_neighbors(query, radius=1 - eps)
+
+    assert_array_equal(np.sort(exact_idx[0]), [0, 1])
+    assert_array_equal(np.sort(approx_idx[0]), [0, 1])
+    assert_array_almost_equal(np.sort(exact_dists[0]), dists[:-2])
+    assert_array_almost_equal(np.sort(approx_dists[0]), dists[:-2])
 
 
 def test_distances():
-    """Checks whether returned neighbors are from closest to farthest."""
+    # Checks whether returned neighbors are from closest to farthest.
     n_samples = 12
     n_features = 2
     n_iter = 10
@@ -211,26 +287,25 @@ def test_distances():
     X = rng.rand(n_samples, n_features)
 
     lshf = LSHForest()
-    lshf.fit(X)
+    ignore_warnings(lshf.fit)(X)
 
     for i in range(n_iter):
         n_neighbors = rng.randint(0, n_samples)
-        query = X[rng.randint(0, n_samples)]
+        query = X[rng.randint(0, n_samples)].reshape(1, -1)
         distances, neighbors = lshf.kneighbors(query,
                                                n_neighbors=n_neighbors,
                                                return_distance=True)
-        # Returned neighbors should be from closest to farthest.
+
+        # Returned neighbors should be from closest to farthest, that is
+        # increasing distance values.
         assert_true(np.all(np.diff(distances[0]) >= 0))
 
-        mean_dist = np.mean(pairwise_distances(query, X, metric='cosine'))
-        distances, neighbors = lshf.radius_neighbors(query,
-                                                     radius=mean_dist,
-                                                     return_distance=True)
-        assert_true(np.all(np.diff(distances[0]) >= 0))
+        # Note: the radius_neighbors method does not guarantee the order of
+        # the results.
 
 
 def test_fit():
-    """Checks whether `fit` method sets all attribute values correctly."""
+    # Checks whether `fit` method sets all attribute values correctly.
     n_samples = 12
     n_features = 2
     n_estimators = 5
@@ -238,7 +313,7 @@ def test_fit():
     X = rng.rand(n_samples, n_features)
 
     lshf = LSHForest(n_estimators=n_estimators)
-    lshf.fit(X)
+    ignore_warnings(lshf.fit)(X)
 
     # _input_array = X
     assert_array_equal(X, lshf._fit_X)
@@ -257,10 +332,8 @@ def test_fit():
 
 
 def test_partial_fit():
-    """Checks whether inserting array is consitent with fitted data.
-
-    `partial_fit` method should set all attribute values correctly.
-    """
+    # Checks whether inserting array is consitent with fitted data.
+    # `partial_fit` method should set all attribute values correctly.
     n_samples = 12
     n_samples_partial_fit = 3
     n_features = 2
@@ -271,16 +344,16 @@ def test_partial_fit():
     lshf = LSHForest()
 
     # Test unfitted estimator
-    lshf.partial_fit(X)
+    ignore_warnings(lshf.partial_fit)(X)
     assert_array_equal(X, lshf._fit_X)
 
-    lshf.fit(X)
+    ignore_warnings(lshf.fit)(X)
 
     # Insert wrong dimension
     assert_raises(ValueError, lshf.partial_fit,
                   np.random.randn(n_samples_partial_fit, n_features - 1))
 
-    lshf.partial_fit(X_partial_fit)
+    ignore_warnings(lshf.partial_fit)(X_partial_fit)
 
     # size of _input_array = samples + 1 after insertion
     assert_equal(lshf._fit_X.shape[0],
@@ -294,13 +367,11 @@ def test_partial_fit():
 
 
 def test_hash_functions():
-    """Checks randomness of hash functions.
-
-    Variance and mean of each hash function (projection vector)
-    should be different from flattened array of hash functions.
-    If hash functions are not randomly built (seeded with
-    same value), variances and means of all functions are equal.
-    """
+    # Checks randomness of hash functions.
+    # Variance and mean of each hash function (projection vector)
+    # should be different from flattened array of hash functions.
+    # If hash functions are not randomly built (seeded with
+    # same value), variances and means of all functions are equal.
     n_samples = 12
     n_features = 2
     n_estimators = 5
@@ -309,7 +380,7 @@ def test_hash_functions():
 
     lshf = LSHForest(n_estimators=n_estimators,
                      random_state=rng.randint(0, np.iinfo(np.int32).max))
-    lshf.fit(X)
+    ignore_warnings(lshf.fit)(X)
 
     hash_functions = []
     for i in range(n_estimators):
@@ -325,19 +396,17 @@ def test_hash_functions():
 
 
 def test_candidates():
-    """Checks whether candidates are sufficient.
-
-    This should handle the cases when number of candidates is 0.
-    User should be warned when number of candidates is less than
-    requested number of neighbors.
-    """
+    # Checks whether candidates are sufficient.
+    # This should handle the cases when number of candidates is 0.
+    # User should be warned when number of candidates is less than
+    # requested number of neighbors.
     X_train = np.array([[5, 5, 2], [21, 5, 5], [1, 1, 1], [8, 9, 1],
                         [6, 10, 2]], dtype=np.float32)
-    X_test = np.array([7, 10, 3], dtype=np.float32)
+    X_test = np.array([7, 10, 3], dtype=np.float32).reshape(1, -1)
 
     # For zero candidates
     lshf = LSHForest(min_hash_match=32)
-    lshf.fit(X_train)
+    ignore_warnings(lshf.fit)(X_train)
 
     message = ("Number of candidates is not sufficient to retrieve"
                " %i neighbors with"
@@ -351,7 +420,7 @@ def test_candidates():
 
     # For candidates less than n_neighbors
     lshf = LSHForest(min_hash_match=31)
-    lshf.fit(X_train)
+    ignore_warnings(lshf.fit)(X_train)
 
     message = ("Number of candidates is not sufficient to retrieve"
                " %i neighbors with"
@@ -365,7 +434,7 @@ def test_candidates():
 
 
 def test_graphs():
-    """Smoke tests for graph methods."""
+    # Smoke tests for graph methods.
     n_samples_sizes = [5, 10, 20]
     n_features = 3
     rng = np.random.RandomState(42)
@@ -373,7 +442,7 @@ def test_graphs():
     for n_samples in n_samples_sizes:
         X = rng.rand(n_samples, n_features)
         lshf = LSHForest(min_hash_match=0)
-        lshf.fit(X)
+        ignore_warnings(lshf.fit)(X)
 
         kneighbors_graph = lshf.kneighbors_graph(X)
         radius_neighbors_graph = lshf.radius_neighbors_graph(X)
@@ -394,8 +463,9 @@ def test_sparse_input():
 
     d_sparse, i_sparse = forest_sparse.kneighbors(X2, return_distance=True)
     d_dense, i_dense = forest_dense.kneighbors(X2.A, return_distance=True)
-    assert_array_equal(d_sparse, d_dense)
-    assert_array_equal(i_sparse, i_dense)
+
+    assert_almost_equal(d_sparse, d_dense)
+    assert_almost_equal(i_sparse, i_dense)
 
     d_sparse, i_sparse = forest_sparse.radius_neighbors(X2,
                                                         return_distance=True)
@@ -403,11 +473,6 @@ def test_sparse_input():
                                                      return_distance=True)
     assert_equal(d_sparse.shape, d_dense.shape)
     for a, b in zip(d_sparse, d_dense):
-        assert_array_equal(a, b)
+        assert_almost_equal(a, b)
     for a, b in zip(i_sparse, i_dense):
-        assert_array_equal(a, b)
-
-
-if __name__ == "__main__":
-    import nose
-    nose.runmodule()
+        assert_almost_equal(a, b)

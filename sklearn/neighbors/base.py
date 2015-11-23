@@ -17,12 +17,13 @@ from .kd_tree import KDTree
 from ..base import BaseEstimator
 from ..metrics import pairwise_distances
 from ..metrics.pairwise import PAIRWISE_DISTANCE_FUNCTIONS
-from ..utils import check_X_y, check_array
+from ..utils import check_X_y, check_array, _get_n_jobs, gen_even_slices
 from ..utils.fixes import argpartition
-from ..utils.validation import DataConversionWarning
-from ..utils.validation import NotFittedError
+from ..utils.multiclass import check_classification_targets
 from ..externals import six
-
+from ..externals.joblib import Parallel, delayed
+from ..exceptions import NotFittedError
+from ..exceptions import DataConversionWarning
 
 VALID_METRICS = dict(ball_tree=BallTree.valid_metrics,
                      kd_tree=KDTree.valid_metrics,
@@ -41,14 +42,6 @@ VALID_METRICS = dict(ball_tree=BallTree.valid_metrics,
 VALID_METRICS_SPARSE = dict(ball_tree=[],
                             kd_tree=[],
                             brute=PAIRWISE_DISTANCE_FUNCTIONS.keys())
-
-
-class NeighborsWarning(UserWarning):
-    pass
-
-
-# Make sure that NeighborsWarning are displayed more than once
-warnings.simplefilter("always", NeighborsWarning)
 
 
 def _check_weights(weights):
@@ -80,8 +73,24 @@ def _get_weights(dist, weights):
     if weights in (None, 'uniform'):
         return None
     elif weights == 'distance':
-        with np.errstate(divide='ignore'):
-            dist = 1. / dist
+        # if user attempts to classify a point that was zero distance from one
+        # or more training points, those training points are weighted as 1.0
+        # and the other points as 0.0
+        if dist.dtype is np.dtype(object):
+            for point_dist_i, point_dist in enumerate(dist):
+                # check if point_dist is iterable
+                # (ex: RadiusNeighborClassifier.predict may set an element of
+                # dist to 1e-6 to represent an 'outlier')
+                if hasattr(point_dist, '__contains__') and 0. in point_dist:
+                    dist[point_dist_i] = point_dist == 0.
+                else:
+                    dist[point_dist_i] = 1. / point_dist
+        else:
+            with np.errstate(divide='ignore'):
+                dist = 1. / dist
+            inf_mask = np.isinf(dist)
+            inf_row = np.any(inf_mask, axis=1)
+            dist[inf_row] = inf_mask[inf_row]
         return dist
     elif callable(weights):
         return weights(dist)
@@ -99,16 +108,7 @@ class NeighborsBase(six.with_metaclass(ABCMeta, BaseEstimator)):
 
     def _init_params(self, n_neighbors=None, radius=None,
                      algorithm='auto', leaf_size=30, metric='minkowski',
-                     p=2, metric_params=None, **kwargs):
-        if kwargs:
-            warnings.warn("Passing additional arguments to the metric "
-                          "function as **kwargs is deprecated "
-                          "and will no longer be supported in 0.18. "
-                          "Use metric_params instead.",
-                          DeprecationWarning, stacklevel=3)
-            if metric_params is None:
-                metric_params = {}
-            metric_params.update(kwargs)
+                     p=2, metric_params=None, n_jobs=1):
 
         self.n_neighbors = n_neighbors
         self.radius = radius
@@ -117,13 +117,17 @@ class NeighborsBase(six.with_metaclass(ABCMeta, BaseEstimator)):
         self.metric = metric
         self.metric_params = metric_params
         self.p = p
+        self.n_jobs = n_jobs
 
         if algorithm not in ['auto', 'brute',
                              'kd_tree', 'ball_tree']:
             raise ValueError("unrecognized algorithm: '%s'" % algorithm)
 
         if algorithm == 'auto':
-            alg_check = 'ball_tree'
+            if metric == 'precomputed':
+                alg_check = 'brute'
+            else:
+                alg_check = 'ball_tree'
         else:
             alg_check = algorithm
 
@@ -220,8 +224,9 @@ class NeighborsBase(six.with_metaclass(ABCMeta, BaseEstimator)):
         if self._fit_method == 'auto':
             # A tree approach is better for small number of neighbors,
             # and KDTree is generally faster when available
-            if (self.n_neighbors is None
-                    or self.n_neighbors < self._fit_X.shape[0] // 2):
+            if ((self.n_neighbors is None or
+                 self.n_neighbors < self._fit_X.shape[0] // 2) and
+                    self.metric != 'precomputed'):
                 if self.effective_metric_ in VALID_METRICS['kd_tree']:
                     self._fit_method = 'kd_tree'
                 else:
@@ -242,7 +247,20 @@ class NeighborsBase(six.with_metaclass(ABCMeta, BaseEstimator)):
         else:
             raise ValueError("algorithm = '%s' not recognized"
                              % self.algorithm)
+
+        if self.n_neighbors is not None:
+            if self.n_neighbors <= 0:
+                raise ValueError(
+                    "Expected n_neighbors > 0. Got %d" %
+                    self.n_neighbors
+                )
+
         return self
+
+    @property
+    def _pairwise(self):
+        # For cross-validation routines to split data correctly
+        return self.metric == 'precomputed'
 
 
 class KNeighborsMixin(object):
@@ -251,11 +269,12 @@ class KNeighborsMixin(object):
     def kneighbors(self, X=None, n_neighbors=None, return_distance=True):
         """Finds the K-neighbors of a point.
 
-        Returns distance
+        Returns indices of and distances to the neighbors of each point.
 
         Parameters
         ----------
-        X : array-like, last dimension same as that of fit data, optional
+        X : array-like, shape (n_query, n_features), \
+                or (n_query, n_indexed) if metric == 'precomputed'
             The query point or points.
             If not provided, neighbors of each indexed point are returned.
             In this case, the query point is not considered its own neighbor.
@@ -270,7 +289,7 @@ class KNeighborsMixin(object):
         Returns
         -------
         dist : array
-            Array representing the lengths to point, only present if
+            Array representing the lengths to points, only present if
             return_distance=True
 
         ind : array
@@ -287,7 +306,7 @@ class KNeighborsMixin(object):
         >>> neigh = NearestNeighbors(n_neighbors=1)
         >>> neigh.fit(samples) # doctest: +ELLIPSIS
         NearestNeighbors(algorithm='auto', leaf_size=30, ...)
-        >>> print(neigh.kneighbors([1., 1., 1.])) # doctest: +ELLIPSIS
+        >>> print(neigh.kneighbors([[1., 1., 1.]])) # doctest: +ELLIPSIS
         (array([[ 0.5]]), array([[2]]...))
 
         As you can see, it returns [[0.5]], and [[2]], which means that the
@@ -319,21 +338,23 @@ class KNeighborsMixin(object):
         train_size = self._fit_X.shape[0]
         if n_neighbors > train_size:
             raise ValueError(
-                "Expected n_neighbors <= %d. Got %d" %
+                "Expected n_neighbors <= n_samples, "
+                " but n_samples = %d, n_neighbors = %d" %
                 (train_size, n_neighbors)
             )
         n_samples, _ = X.shape
         sample_range = np.arange(n_samples)[:, None]
 
+        n_jobs = _get_n_jobs(self.n_jobs)
         if self._fit_method == 'brute':
             # for efficiency, use squared euclidean distances
             if self.effective_metric_ == 'euclidean':
                 dist = pairwise_distances(X, self._fit_X, 'euclidean',
-                                          squared=True)
+                                          n_jobs=n_jobs, squared=True)
             else:
-                dist = pairwise_distances(X, self._fit_X,
-                                          self.effective_metric_,
-                                          **self.effective_metric_params_)
+                dist = pairwise_distances(
+                    X, self._fit_X, self.effective_metric_, n_jobs=n_jobs,
+                    **self.effective_metric_params_)
 
             neigh_ind = argpartition(dist, n_neighbors - 1, axis=1)
             neigh_ind = neigh_ind[:, :n_neighbors]
@@ -354,14 +375,21 @@ class KNeighborsMixin(object):
                 raise ValueError(
                     "%s does not work with sparse matrices. Densify the data, "
                     "or set algorithm='brute'" % self._fit_method)
-            result = self._tree.query(X, n_neighbors,
-                                      return_distance=return_distance)
+            result = Parallel(n_jobs, backend='threading')(
+                delayed(self._tree.query, check_pickle=False)(
+                    X[s], n_neighbors, return_distance)
+                for s in gen_even_slices(X.shape[0], n_jobs)
+            )
+            if return_distance:
+                dist, neigh_ind = tuple(zip(*result))
+                result = np.vstack(dist), np.vstack(neigh_ind)
+            else:
+                result = np.vstack(result)
         else:
             raise ValueError("internal: _fit_method not recognized")
 
         if not query_is_train:
             return result
-
         else:
             # If the query data is the same as the indexed data, we would like
             # to ignore the first nearest neighbor of every sample, i.e
@@ -395,7 +423,8 @@ class KNeighborsMixin(object):
 
         Parameters
         ----------
-        X : array-like, last dimension same as that of fit data, optional
+        X : array-like, shape (n_query, n_features), \
+                or (n_query, n_indexed) if metric == 'precomputed'
             The query point or points.
             If not provided, neighbors of each indexed point are returned.
             In this case, the query point is not considered its own neighbor.
@@ -473,7 +502,12 @@ class RadiusNeighborsMixin(object):
     def radius_neighbors(self, X=None, radius=None, return_distance=True):
         """Finds the neighbors within a given radius of a point or points.
 
-        Returns indices of and distances to the neighbors of each point.
+        Return the indices and distances of each point from the dataset
+        lying in a ball with size ``radius`` around the points of the query
+        array. Points lying on the boundary are included in the results.
+
+        The result points are *not* necessarily sorted by distance to their
+        query point.
 
         Parameters
         ----------
@@ -491,18 +525,21 @@ class RadiusNeighborsMixin(object):
 
         Returns
         -------
-        dist : array
-            Array representing the euclidean distances to each point,
-            only present if return_distance=True.
+        dist : array, shape (n_samples,) of arrays
+            Array representing the distances to each point, only present if
+            return_distance=True. The distance values are computed according
+            to the ``metric`` constructor parameter.
 
-        ind : array
-            Indices of the nearest points in the population matrix.
+        ind : array, shape (n_samples,) of arrays
+            An array of arrays of indices of the approximate nearest points
+            from the population matrix that lie within a ball of size
+            ``radius`` around the query points.
 
         Examples
         --------
         In the following example, we construct a NeighborsClassifier
         class from an array representing our data set and ask who's
-        the closest point to [1,1,1]
+        the closest point to [1, 1, 1]:
 
         >>> import numpy as np
         >>> samples = [[0., 0., 0.], [0., .5, 0.], [1., 1., .5]]
@@ -510,7 +547,7 @@ class RadiusNeighborsMixin(object):
         >>> neigh = NearestNeighbors(radius=1.6)
         >>> neigh.fit(samples) # doctest: +ELLIPSIS
         NearestNeighbors(algorithm='auto', leaf_size=30, ...)
-        >>> rng = neigh.radius_neighbors([1., 1., 1.])
+        >>> rng = neigh.radius_neighbors([[1., 1., 1.]])
         >>> print(np.asarray(rng[0][0])) # doctest: +ELLIPSIS
         [ 1.5  0.5]
         >>> print(np.asarray(rng[1][0])) # doctest: +ELLIPSIS
@@ -553,15 +590,15 @@ class RadiusNeighborsMixin(object):
                                           self.effective_metric_,
                                           **self.effective_metric_params_)
 
-            neigh_ind_list = [np.where(d < radius)[0] for d in dist]
+            neigh_ind_list = [np.where(d <= radius)[0] for d in dist]
 
             # See https://github.com/numpy/numpy/issues/5456
             # if you want to understand why this is initialized this way.
             neigh_ind = np.empty(n_samples, dtype='object')
             neigh_ind[:] = neigh_ind_list
-            dist_array = np.empty(n_samples, dtype='object')
 
             if return_distance:
+                dist_array = np.empty(n_samples, dtype='object')
                 if self.effective_metric_ == 'euclidean':
                     dist_list = [np.sqrt(d[neigh_ind[i]])
                                  for i, d in enumerate(dist)]
@@ -692,7 +729,8 @@ class SupervisedFloatMixin(object):
         Parameters
         ----------
         X : {array-like, sparse matrix, BallTree, KDTree}
-            Training data. If array or matrix, shape = [n_samples, n_features]
+            Training data. If array or matrix, shape [n_samples, n_features],
+            or [n_samples, n_samples] if metric='precomputed'.
 
         y : {array-like, sparse matrix}
             Target values, array of float values, shape = [n_samples]
@@ -711,7 +749,8 @@ class SupervisedIntegerMixin(object):
         Parameters
         ----------
         X : {array-like, sparse matrix, BallTree, KDTree}
-            Training data. If array or matrix, shape = [n_samples, n_features]
+            Training data. If array or matrix, shape [n_samples, n_features],
+            or [n_samples, n_samples] if metric='precomputed'.
 
         y : {array-like, sparse matrix}
             Target values of shape = [n_samples] or [n_samples, n_outputs]
@@ -732,6 +771,7 @@ class SupervisedIntegerMixin(object):
         else:
             self.outputs_2d_ = True
 
+        check_classification_targets(y)
         self.classes_ = []
         self._y = np.empty(y.shape, dtype=np.int)
         for k in range(self._y.shape[1]):
@@ -752,6 +792,7 @@ class UnsupervisedMixin(object):
         Parameters
         ----------
         X : {array-like, sparse matrix, BallTree, KDTree}
-            Training data. If array or matrix, shape = [n_samples, n_features]
+            Training data. If array or matrix, shape [n_samples, n_features],
+            or [n_samples, n_samples] if metric='precomputed'.
         """
         return self._fit(X)

@@ -9,6 +9,7 @@ import warnings
 from .base import KNeighborsMixin, RadiusNeighborsMixin
 from .unsupervised import NearestNeighbors
 
+
 def _check_params(X, metric, p, metric_params):
     """Check the validity of the input parameters"""
     params = zip(['metric', 'p', 'metric_params'],
@@ -22,29 +23,21 @@ def _check_params(X, metric, p, metric_params):
                     func_param, param_name, est_params[param_name]))
 
 
-def _query_include_self(X, include_self, mode):
+def _query_include_self(X, include_self):
     """Return the query based on include_self param"""
-    # Done to preserve backward compatibility.
-    if include_self is None:
-        if mode == "connectivity":
-            warnings.warn(
-                "include_self will be set to False, i.e the first NN of each "
-                "sample will not be the sample itself unless explicitly set "
-                "from version 0.18. Set include_self=True is this is "
-                "not sought.", DeprecationWarning)
-            query = X._fit_X
-        else:
-            query = None
-    elif include_self:
+    if include_self:
         query = X._fit_X
     else:
         query = None
+
     return query
 
 
 def kneighbors_graph(X, n_neighbors, mode='connectivity', metric='minkowski',
-                     p=2, metric_params=None, include_self=None):
+                     p=2, metric_params=None, include_self=False):
     """Computes the (weighted) graph of k-Neighbors for points in X
+
+    Read more in the :ref:`User Guide <unsupervised_neighbors>`.
 
     Parameters
     ----------
@@ -66,11 +59,10 @@ def kneighbors_graph(X, n_neighbors, mode='connectivity', metric='minkowski',
         The default distance is 'euclidean' ('minkowski' metric with the p
         param equal to 2.)
 
-    include_self: bool, default backward-compatible.
+    include_self: bool, default=False.
         Whether or not to mark each sample as the first nearest neighbor to
-        itself. This is set to True for mode='connectivity' and False
-        for mode='distance' to preserve backward compatibilty. This will be
-        set to False from version 0.18.
+        itself. If `None`, then True is used for mode='connectivity' and False
+        for mode='distance' as this will preserve backwards compatibilty.
 
     p : int, default 2
         Power parameter for the Minkowski metric. When p = 1, this is
@@ -89,7 +81,7 @@ def kneighbors_graph(X, n_neighbors, mode='connectivity', metric='minkowski',
     --------
     >>> X = [[0], [3], [1]]
     >>> from sklearn.neighbors import kneighbors_graph
-    >>> A = kneighbors_graph(X, 2)
+    >>> A = kneighbors_graph(X, 2, mode='connectivity', include_self=True)
     >>> A.toarray()
     array([[ 1.,  0.,  1.],
            [ 0.,  1.,  1.],
@@ -100,22 +92,23 @@ def kneighbors_graph(X, n_neighbors, mode='connectivity', metric='minkowski',
     radius_neighbors_graph
     """
     if not isinstance(X, KNeighborsMixin):
-        X = NearestNeighbors(
-            n_neighbors, metric=metric, p=p, metric_params=metric_params
-            ).fit(X)
+        X = NearestNeighbors(n_neighbors, metric=metric, p=p,
+                             metric_params=metric_params).fit(X)
     else:
         _check_params(X, metric, p, metric_params)
 
-    query = _query_include_self(X, include_self, mode)
+    query = _query_include_self(X, include_self)
     return X.kneighbors_graph(X=query, n_neighbors=n_neighbors, mode=mode)
 
 
 def radius_neighbors_graph(X, radius, mode='connectivity', metric='minkowski',
-                           p=2, metric_params=None, include_self=None):
+                           p=2, metric_params=None, include_self=False):
     """Computes the (weighted) graph of Neighbors for points in X
 
     Neighborhoods are restricted the points at a distance lower than
     radius.
+
+    Read more in the :ref:`User Guide <unsupervised_neighbors>`.
 
     Parameters
     ----------
@@ -137,11 +130,10 @@ def radius_neighbors_graph(X, radius, mode='connectivity', metric='minkowski',
         gives a list of available metrics. The default distance is
         'euclidean' ('minkowski' metric with the param equal to 2.)
 
-    include_self: bool, default None
+    include_self: bool, default=False
         Whether or not to mark each sample as the first nearest neighbor to
-        itself. This is set to True for mode='connectivity' and False
-        for mode='distance' to preserve backward compatibilty. This will be
-        set to False from version 0.18.
+        itself. If `None`, then True is used for mode='connectivity' and False
+        for mode='distance' as this will preserve backwards compatibilty.
 
     p : int, default 2
         Power parameter for the Minkowski metric. When p = 1, this is
@@ -160,7 +152,7 @@ def radius_neighbors_graph(X, radius, mode='connectivity', metric='minkowski',
     --------
     >>> X = [[0], [3], [1]]
     >>> from sklearn.neighbors import radius_neighbors_graph
-    >>> A = radius_neighbors_graph(X, 1.5)
+    >>> A = radius_neighbors_graph(X, 1.5, mode='connectivity', include_self=True)
     >>> A.toarray()
     array([[ 1.,  0.,  1.],
            [ 0.,  1.,  0.],
@@ -171,12 +163,10 @@ def radius_neighbors_graph(X, radius, mode='connectivity', metric='minkowski',
     kneighbors_graph
     """
     if not isinstance(X, RadiusNeighborsMixin):
-        X = NearestNeighbors(
-            radius=radius, metric=metric, p=p,
-            metric_params=metric_params
-            ).fit(X)
+        X = NearestNeighbors(radius=radius, metric=metric, p=p,
+                             metric_params=metric_params).fit(X)
     else:
         _check_params(X, metric, p, metric_params)
 
-    query = _query_include_self(X, include_self, mode)
+    query = _query_include_self(X, include_self)
     return X.radius_neighbors_graph(query, radius, mode)

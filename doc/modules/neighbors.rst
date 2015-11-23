@@ -456,6 +456,7 @@ leaf nodes.  The level of this switch can be specified with the parameter
 
 ``leaf_size`` is not referenced for brute force queries.
 
+.. _nearest_centroid_classifier:
 
 Nearest Centroid Classifier
 ===========================
@@ -466,9 +467,9 @@ similar to the label updating phase of the :class:`sklearn.KMeans` algorithm.
 It also has no parameters to choose, making it a good baseline classifier. It
 does, however, suffer on non-convex classes, as well as when classes have
 drastically different variances, as equal variance in all dimensions is
-assumed. See Linear Discriminant Analysis (:class:`sklearn.lda.LDA`) and
-Quadratic Discriminant Analysis (:class:`sklearn.qda.QDA`) for more complex
-methods that do not make this assumption. Usage of the default
+assumed. See Linear Discriminant Analysis (:class:`sklearn.discriminant_analysis.LinearDiscriminantAnalysis`)
+and Quadratic Discriminant Analysis (:class:`sklearn.discriminant_analysis.QuadraticDiscriminantAnalysis`)
+for more complex methods that do not make this assumption. Usage of the default
 :class:`NearestCentroid` is simple:
 
     >>> from sklearn.neighbors.nearest_centroid import NearestCentroid
@@ -510,6 +511,8 @@ the model from 0.81 to 0.82.
 
   * :ref:`example_neighbors_plot_nearest_centroid.py`: an example of
     classification using nearest centroid with different shrink thresholds.
+
+.. _approximate_nearest_neighbors:
 
 Approximate Nearest Neighbors
 =============================
@@ -614,7 +617,7 @@ locality sensitive as follows.
 
 A family :math:`H` of functions from a domain :math:`S` to a range :math:`U`
 is called :math:`(r, e , p1 , p2 )`-sensitive, with :math:`r, e > 0`,
-:math:`p_1 > p_2 > 0`, if for any :math:`p, q ∈ S`, the following conditions
+:math:`p_1 > p_2 > 0`, if for any :math:`p, q \in S`, the following conditions
 hold (:math:`D` is the distance function):
 
 * If :math:`D(p,q) <= r` then :math:`P_H[h(p) = h(q)] >= p_1`,
@@ -627,7 +630,7 @@ probability of :math:`p_2` of collision. Suppose there is a family of LSH
 function :math:`H`. An *LSH index* is built as follows:
 
 1. Choose :math:`k` functions :math:`h_1, h_2, … h_k` uniformly at
-   random (with replacement) from :math:`H`. For any :math:`p ∈ S`, place
+   random (with replacement) from :math:`H`. For any :math:`p \in S`, place
    :math:`p` in the bucket with label
    :math:`g(p) = (h_1(p), h_2(p), … h_k(p))`. Observe that if
    each :math:`h_i` outputs one “digit”, each bucket has a k-digit label.

@@ -12,6 +12,7 @@ Seeding is performed using a binning technique for scalability.
 # Authors: Conrad Lee <conradlee@gmail.com>
 #          Alexandre Gramfort <alexandre.gramfort@inria.fr>
 #          Gael Varoquaux <gael.varoquaux@normalesup.org>
+#          Martino Sorbaro <martino.sorbaro@ed.ac.uk>
 
 import numpy as np
 import warnings
@@ -23,6 +24,8 @@ from ..utils import extmath, check_random_state, gen_batches, check_array
 from ..base import BaseEstimator, ClusterMixin
 from ..neighbors import NearestNeighbors
 from ..metrics.pairwise import pairwise_distances_argmin
+from ..externals.joblib import Parallel
+from ..externals.joblib import delayed
 
 
 def estimate_bandwidth(X, quantile=0.3, n_samples=None, random_state=0):
@@ -66,10 +69,34 @@ def estimate_bandwidth(X, quantile=0.3, n_samples=None, random_state=0):
     return bandwidth / X.shape[0]
 
 
+# separate function for each seed's iterative loop
+def _mean_shift_single_seed(my_mean, X, nbrs, max_iter):
+    # For each seed, climb gradient until convergence or max_iter
+    bandwidth = nbrs.get_params()['radius']
+    stop_thresh = 1e-3 * bandwidth  # when mean has converged
+    completed_iterations = 0
+    while True:
+        # Find mean of points within bandwidth
+        i_nbrs = nbrs.radius_neighbors([my_mean], bandwidth,
+                                       return_distance=False)[0]
+        points_within = X[i_nbrs]
+        if len(points_within) == 0:
+            break  # Depending on seeding strategy this condition may occur
+        my_old_mean = my_mean  # save the old mean
+        my_mean = np.mean(points_within, axis=0)
+        # If converged or at max_iter, adds the cluster
+        if (extmath.norm(my_mean - my_old_mean) < stop_thresh or
+                completed_iterations == max_iter):
+            return tuple(my_mean), len(points_within)
+        completed_iterations += 1
+
+
 def mean_shift(X, bandwidth=None, seeds=None, bin_seeding=False,
                min_bin_freq=1, cluster_all=True, max_iter=300,
-               max_iterations=None):
+               n_jobs=1):
     """Perform mean shift clustering of data using a flat kernel.
+
+    Read more in the :ref:`User Guide <mean_shift>`.
 
     Parameters
     ----------
@@ -85,21 +112,22 @@ def mean_shift(X, bandwidth=None, seeds=None, bin_seeding=False,
         the number of samples. The sklearn.cluster.estimate_bandwidth function
         can be used to do this more efficiently.
 
-    seeds : array-like, shape=[n_seeds, n_features]
-        Point used as initial kernel locations.
+    seeds : array-like, shape=[n_seeds, n_features] or None
+        Point used as initial kernel locations. If None and bin_seeding=False,
+        each data point is used as a seed. If None and bin_seeding=True,
+        see bin_seeding.
 
-    bin_seeding : boolean
+    bin_seeding : boolean, default=False
         If true, initial kernel locations are not locations of all
         points, but rather the location of the discretized version of
         points, where points are binned onto a grid whose coarseness
         corresponds to the bandwidth. Setting this option to True will speed
         up the algorithm because fewer seeds will be initialized.
-        default value: False
         Ignored if seeds argument is not None.
 
-    min_bin_freq : int, optional
+    min_bin_freq : int, default=1
        To speed up the algorithm, accept only those bins with at least
-       min_bin_freq points as seeds. If not defined, set to 1.
+       min_bin_freq points as seeds.
 
     cluster_all : boolean, default True
         If true, then all points are clustered, even those orphans that are
@@ -109,6 +137,18 @@ def mean_shift(X, bandwidth=None, seeds=None, bin_seeding=False,
     max_iter : int, default 300
         Maximum number of iterations, per seed point before the clustering
         operation terminates (for that seed point), if has not converged yet.
+
+    n_jobs : int
+        The number of jobs to use for the computation. This works by computing
+        each of the n_init runs in parallel.
+
+        If -1 all CPUs are used. If 1 is given, no parallel computing code is
+        used at all, which is useful for debugging. For n_jobs below -1,
+        (n_cpus + 1 + n_jobs) are used. Thus for n_jobs = -2, all CPUs but one
+        are used.
+
+        .. versionadded:: 0.17
+           Parallel Execution using *n_jobs*.
 
     Returns
     -------
@@ -124,43 +164,36 @@ def mean_shift(X, bandwidth=None, seeds=None, bin_seeding=False,
     See examples/cluster/plot_meanshift.py for an example.
 
     """
-    # FIXME To be removed in 0.18
-    if max_iterations is not None:
-        warnings.warn("The `max_iterations` parameter has been renamed to "
-                      "`max_iter` from version 0.16. The `max_iterations` "
-                      "parameter will be removed in 0.18", DeprecationWarning)
-        max_iter = max_iterations
 
     if bandwidth is None:
         bandwidth = estimate_bandwidth(X)
+    elif bandwidth <= 0:
+        raise ValueError("bandwidth needs to be greater than zero or None,\
+            got %f" % bandwidth)
     if seeds is None:
         if bin_seeding:
             seeds = get_bin_seeds(X, bandwidth, min_bin_freq)
         else:
             seeds = X
     n_samples, n_features = X.shape
-    stop_thresh = 1e-3 * bandwidth  # when mean has converged
     center_intensity_dict = {}
     nbrs = NearestNeighbors(radius=bandwidth).fit(X)
 
-    # For each seed, climb gradient until convergence or max_iter
-    for my_mean in seeds:
-        completed_iterations = 0
-        while True:
-            # Find mean of points within bandwidth
-            i_nbrs = nbrs.radius_neighbors([my_mean], bandwidth,
-                                           return_distance=False)[0]
-            points_within = X[i_nbrs]
-            if len(points_within) == 0:
-                break  # Depending on seeding strategy this condition may occur
-            my_old_mean = my_mean  # save the old mean
-            my_mean = np.mean(points_within, axis=0)
-            # If converged or at max_iter, addS the cluster
-            if (extmath.norm(my_mean - my_old_mean) < stop_thresh or
-                    completed_iterations == max_iter):
-                center_intensity_dict[tuple(my_mean)] = len(points_within)
-                break
-            completed_iterations += 1
+    # execute iterations on all seeds in parallel
+    all_res = Parallel(n_jobs=n_jobs)(
+        delayed(_mean_shift_single_seed)
+        (seed, X, nbrs, max_iter) for seed in seeds)
+    # copy results in a dictionary
+    for i in range(len(seeds)):
+        if all_res[i] is not None:
+            center_intensity_dict[all_res[i][0]] = all_res[i][1]
+
+    if not center_intensity_dict:
+        # nothing near seeds
+        raise ValueError("No point was within bandwidth=%f of any seed."
+                         " Try a different seeding strategy \
+                         or increase the bandwidth."
+                         % bandwidth)
 
     # POST PROCESSING: remove near duplicate points
     # If the distance between two kernels is less than the bandwidth,
@@ -225,12 +258,16 @@ def get_bin_seeds(X, bin_size, min_bin_freq=1):
     # Bin points
     bin_sizes = defaultdict(int)
     for point in X:
-        binned_point = np.cast[np.int32](point / bin_size)
+        binned_point = np.round(point / bin_size)
         bin_sizes[tuple(binned_point)] += 1
 
     # Select only those bins as seeds which have enough members
     bin_seeds = np.array([point for point, freq in six.iteritems(bin_sizes) if
                           freq >= min_bin_freq], dtype=np.float32)
+    if len(bin_seeds) == len(X):
+        warnings.warn("Binning data failed with provided bin_size=%f,"
+                      " using data points as seeds." % bin_size)
+        return X
     bin_seeds = bin_seeds * bin_size
     return bin_seeds
 
@@ -245,6 +282,8 @@ class MeanShift(BaseEstimator, ClusterMixin):
     eliminate near-duplicates to form the final set of centroids.
 
     Seeding is performed using a binning technique for scalability.
+
+    Read more in the :ref:`User Guide <mean_shift>`.
 
     Parameters
     ----------
@@ -278,6 +317,15 @@ class MeanShift(BaseEstimator, ClusterMixin):
         If true, then all points are clustered, even those orphans that are
         not within any kernel. Orphans are assigned to the nearest kernel.
         If false, then orphans are given cluster label -1.
+
+    n_jobs : int
+        The number of jobs to use for the computation. This works by computing
+        each of the n_init runs in parallel.
+
+        If -1 all CPUs are used. If 1 is given, no parallel computing code is
+        used at all, which is useful for debugging. For n_jobs below -1,
+        (n_cpus + 1 + n_jobs) are used. Thus for n_jobs = -2, all CPUs but one
+        are used.
 
     Attributes
     ----------
@@ -313,14 +361,15 @@ class MeanShift(BaseEstimator, ClusterMixin):
 
     """
     def __init__(self, bandwidth=None, seeds=None, bin_seeding=False,
-                 min_bin_freq=1, cluster_all=True):
+                 min_bin_freq=1, cluster_all=True, n_jobs=1):
         self.bandwidth = bandwidth
         self.seeds = seeds
         self.bin_seeding = bin_seeding
         self.cluster_all = cluster_all
         self.min_bin_freq = min_bin_freq
+        self.n_jobs = n_jobs
 
-    def fit(self, X):
+    def fit(self, X, y=None):
         """Perform clustering.
 
         Parameters
@@ -333,7 +382,7 @@ class MeanShift(BaseEstimator, ClusterMixin):
             mean_shift(X, bandwidth=self.bandwidth, seeds=self.seeds,
                        min_bin_freq=self.min_bin_freq,
                        bin_seeding=self.bin_seeding,
-                       cluster_all=self.cluster_all)
+                       cluster_all=self.cluster_all, n_jobs=self.n_jobs)
         return self
 
     def predict(self, X):

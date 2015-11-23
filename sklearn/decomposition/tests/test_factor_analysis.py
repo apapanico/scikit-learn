@@ -11,13 +11,12 @@ from sklearn.utils.testing import assert_less
 from sklearn.utils.testing import assert_raises
 from sklearn.utils.testing import assert_almost_equal
 from sklearn.utils.testing import assert_array_almost_equal
-from sklearn.utils import ConvergenceWarning
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.decomposition import FactorAnalysis
 
 
 def test_factor_analysis():
-    """Test FactorAnalysis ability to recover the data covariance structure
-    """
+    # Test FactorAnalysis ability to recover the data covariance structure
     rng = np.random.RandomState(0)
     n_samples, n_features, n_components = 20, 5, 3
 

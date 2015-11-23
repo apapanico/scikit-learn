@@ -4,9 +4,9 @@ interface for model selection and evaluation using
 arbitrary score functions.
 
 A scorer object is a callable that can be passed to
-:class:`sklearn.grid_search.GridSearchCV` or
-:func:`sklearn.cross_validation.cross_val_score` as the ``scoring`` parameter,
-to specify how a model should be evaluated.
+:class:`sklearn.model_selection.GridSearchCV` or
+:func:`sklearn.model_selection.cross_val_score` as the ``scoring``
+parameter, to specify how a model should be evaluated.
 
 The signature of the call is ``(estimator, X, y)`` where ``estimator``
 is the model to be evaluated, ``X`` is the test data and ``y`` is the
@@ -30,6 +30,7 @@ from . import (r2_score, median_absolute_error, mean_absolute_error,
 from .cluster import adjusted_rand_score
 from ..utils.multiclass import type_of_target
 from ..externals import six
+from ..base import is_regressor
 
 
 class _BaseScorer(six.with_metaclass(ABCMeta, object)):
@@ -157,20 +158,23 @@ class _ThresholdScorer(_BaseScorer):
         if y_type not in ("binary", "multilabel-indicator"):
             raise ValueError("{0} format is not supported".format(y_type))
 
-        try:
-            y_pred = clf.decision_function(X)
+        if is_regressor(clf):
+            y_pred = clf.predict(X)
+        else:
+            try:
+                y_pred = clf.decision_function(X)
 
-            # For multi-output multi-class estimator
-            if isinstance(y_pred, list):
-                y_pred = np.vstack(p for p in y_pred).T
+                # For multi-output multi-class estimator
+                if isinstance(y_pred, list):
+                    y_pred = np.vstack(p for p in y_pred).T
 
-        except (NotImplementedError, AttributeError):
-            y_pred = clf.predict_proba(X)
+            except (NotImplementedError, AttributeError):
+                y_pred = clf.predict_proba(X)
 
-            if y_type == "binary":
-                y_pred = y_pred[:, 1]
-            elif isinstance(y_pred, list):
-                y_pred = np.vstack([p[:, -1] for p in y_pred]).T
+                if y_type == "binary":
+                    y_pred = y_pred[:, 1]
+                elif isinstance(y_pred, list):
+                    y_pred = np.vstack([p[:, -1] for p in y_pred]).T
 
         if sample_weight is not None:
             return self._sign * self._score_func(y, y_pred,
@@ -251,6 +255,8 @@ def make_scorer(score_func, greater_is_better=True, needs_proba=False,
     ``mean_squared_error``, ``adjusted_rand_index`` or ``average_precision``
     and returns a callable that scores an estimator's output.
 
+    Read more in the :ref:`User Guide <scoring>`.
+
     Parameters
     ----------
     score_func : callable,
@@ -288,7 +294,7 @@ def make_scorer(score_func, greater_is_better=True, needs_proba=False,
     >>> ftwo_scorer = make_scorer(fbeta_score, beta=2)
     >>> ftwo_scorer
     make_scorer(fbeta_score, beta=2)
-    >>> from sklearn.grid_search import GridSearchCV
+    >>> from sklearn.model_selection import GridSearchCV
     >>> from sklearn.svm import LinearSVC
     >>> grid = GridSearchCV(LinearSVC(), param_grid={'C': [1, 10]},
     ...                     scoring=ftwo_scorer)

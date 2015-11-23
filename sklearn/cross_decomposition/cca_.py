@@ -8,6 +8,8 @@ class CCA(_PLS):
 
     CCA inherits from PLS with mode="B" and deflation_mode="canonical".
 
+    Read more in the :ref:`User Guide <cross_decomposition>`.
+
     Parameters
     ----------
     n_components : int, (default 2).
@@ -99,7 +101,7 @@ class CCA(_PLS):
 
     def __init__(self, n_components=2, scale=True,
                  max_iter=500, tol=1e-06, copy=True):
-        _PLS.__init__(self, n_components=n_components, scale=scale,
-                      deflation_mode="canonical", mode="B",
-                      norm_y_weights=True, algorithm="nipals",
-                      max_iter=max_iter, tol=tol, copy=copy)
+        super(CCA, self).__init__(n_components=n_components, scale=scale,
+                                  deflation_mode="canonical", mode="B",
+                                  norm_y_weights=True, algorithm="nipals",
+                                  max_iter=max_iter, tol=tol, copy=copy)
